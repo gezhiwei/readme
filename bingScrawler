@@ -1,0 +1,318 @@
+#!/usr/bin/env python2
+# -*- coding:utf-8 -*-
+from cookielib import LWPCookieJar
+#from MyParser import MyParser
+import urllib2
+import urllib
+from urllib import urlencode
+from Queue import Queue
+from thread import start_new_thread
+import re
+import os
+import time
+
+THREADCOUNT = 0
+CONSTCOUNT = 0
+CONSTNAME = "SMEG"
+URLFLAG = 0
+SIZE = 1
+
+
+class UserAgent:
+  #Mozilla = 'Mozilla/5.0 (Windows; U; Windows NT 5.1; zh-CN; rv:1.8.1.14) Gecko/20080404 (FoxPlus) Firefox/2.0.0.14'
+  Mozilla = 'Mozilla/5.0 (Windows NT 6.3; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/39.0.2171.95 Safari/537.36'
+
+class Config:
+  keyword = CONSTNAME # 要搜索的关键字 注意不要改变文件编码
+  count = 3000     # 要下载的数量，自动进到20的倍数
+  thread_count = 15 # 线程数
+  timeout = 100 # 下载超时限制 使用超时20 10好像小了点
+  # 代理设置
+  #proxy = 'http://115.28.246.63:3128'
+  proxy = 'http://109.105.1.52:8080'
+  #proxy = 'http://115.28.157.151:3128'
+  use_proxy = True
+  site = 'bing'
+
+
+
+def _getParams(url, parser):
+  """Get a dict contained the url params"""
+  stream = getStream(url)
+  while (stream==False):
+    time.sleep(10)
+    print("net connection is broken!~_getParams")
+    print(url)
+    stream = getStream(url)
+  data = getCodingContent(stream)
+  parser.feed(data)
+  return parser.formParams
+
+def getStream(url, timeout=10):
+  # 返回一个url流或者False
+  request = urllib2.Request(url)
+  request.add_header('User-Agent', UserAgent.Mozilla)
+  try:
+    stream = urllib2.urlopen(request, timeout=timeout)
+  except (Exception, SystemExit): # catch SystemExit to keep running
+    print "URL open error. Probably timed out."
+    return False
+  return stream
+
+def determinCoding(content, header):
+  """Determin a coding of a given url content and it's header.
+  params headers : HTMLHeader instance"""
+  content_type = header['Content-Type']
+  tag = 'charset='
+  if content_type:
+    if tag in content_type:
+      pos = content_type.index(tag)
+      pos += 8
+      return content_type[pos:]
+  content = content.lower()
+  if tag in content:
+    startpos = content.index(tag)
+    endpos = content[startpos:].index('"')
+    return content[startpos+8:endpos]
+
+def getCodingContent(stream):
+  # 获取stream的编码
+  """Return a string in which is the content of given url.
+  return - content : unicode string"""
+  content = stream.read()
+  #print (content.decode('utf-8'))
+
+  coding = determinCoding(content, stream.headers)
+  stream.close()
+  if coding == '':
+  	coding = 'utf-8'
+  #print 'coding = %s' %coding
+  
+  return content.decode(coding,'ignore')
+
+def proxy_install(proxy):
+  proxy_handler = urllib2.ProxyHandler({"http" : proxy})
+  opener = urllib2.build_opener(proxy_handler)
+  urllib2.install_opener(opener)
+
+def getImageUrlList(url):
+  stream = getStream(url)
+  print 'stream = %s' %stream
+  #print(url)
+  while (stream==False):
+    time.sleep(10)
+    print("getImageUrlList:: net connection is broken!")
+    print(url)
+    stream = getStream(url)
+  data = getCodingContent(stream)
+  #pattern = re.compile(r'(?<=&quot;,imgurl:&quot;).*?(?=&quot;,)')
+  #groups = pattern.findall(data)
+  
+  groups=re.findall(r'(http://tse[1234].mm.bing.net/th\?id=OIP.[-_a-zA-Z0-9]{26}&amp;w=\d\d\d&amp;h=\d{3}&amp;pid=1.1)',data)
+  groups_2 = re.findall(r'(http://tse[1234].mm.bing.net/th\?id=OIP.[-_a-zA-Z0-9]{26}&amp;w=\d\d\d&amp;h=\d{3}&amp;c=7&amp;qlt=90&amp;o=4&amp;pid=1.7)', data)
+  #print groups
+  new_group = [amatch for amatch in groups] # 更Pythonic的方式
+  new_group_2 = [amatch for amatch in groups_2]  # 更Pythonic的方式
+  #new_group = ['http://tse4.mm.bing.net/th?id=OIP.uLas8vum1ZUG7ZEkoDW2QgEsDh&amp;w=288&amp;h=216&amp;pid=1.1']
+  return new_group + new_group_2
+
+def getFilenameFromURL(url):
+  # 在 Downloader 中使用
+  pos = url.rfind('/')
+  shorted = url[pos + 1:]
+  pattern = re.compile(r'\w*[\.\w]*')
+  f_name = pattern.findall(shorted)[0]
+  return f_name
+
+def downloadFromQueue(savedir, queue, failure, tmpname, timeout=10):
+  """Get files from a list of urls.
+  return : list, contained the failure fetch"""
+  while not queue.empty():
+    global CONSTNAME
+    global CONSTCOUNT
+    CONSTCOUNT = CONSTCOUNT + 1
+    tmpcount = CONSTCOUNT
+    url = queue.get()
+    #print url
+    stream = getStream(url, timeout=timeout)
+    #file_name = getFilenameFromURL(url)
+    #file_name = CONSTNAME2.decode('utf-8') + str(CONSTCOUNT) + '.jpg'
+    file_name = str(tmpcount) + '.jpg'
+    #print file_name
+    if stream and writeBinFile(savedir, stream, tmpname, file_name):
+      queue.task_done()
+      #print "Fetching", url, 'done.'
+      print file_name
+      continue
+    failure.append(url)
+    queue.task_done()
+  #global THREADCOUNT
+  #THREADCOUNT = THREADCOUNT - 1
+  #print '    out_thread:'+str(THREADCOUNT),
+  print "download is finished. and go to next step!"
+  return failure
+
+def writeBinFile(savedir, stream, tmpname, file_name, mode='wb'):
+  """Read from the given url and write to file_name."""
+  #file_name = "\\\\109.105.7.143\\Intern\\CelebrityDBWolf_bing\\"  + CONSTNAME.decode('utf-8') + "\\" + str(SIZE) + "\\" + file_name
+  file_name = savedir  + tmpname.decode('utf-8')  + "\\" + file_name
+  if os.path.isfile(file_name):
+    print 'File %s exist.' % file_name
+    return False
+  CHUNCK_SIZE = 1024
+  with open(file_name, mode) as fp:
+    while True:
+      try:
+        chunck = stream.read(CHUNCK_SIZE)
+      except (Exception, SystemExit):
+        print 'Fetching error. Probably timed out.'
+        fp.close()
+        os.remove(file_name)
+        return False
+      if not chunck:break
+      fp.write(chunck)
+  return True
+
+def cutTo(str_1, str_2):
+  """Cut str_1 to the position just befor str_2."""
+  # 不包含 str_2
+  if not str_2 in str_1 :
+    return str_1
+  pos = str_1.index(str_2)
+  return str_1[0:pos]
+
+def cutBegin(str_1, str_2):
+  # 在MyParser中使用
+  if not str_2 in str_1:
+    return None
+  pos = str_1.index(str_2) + len(str_2)
+  return str_1[pos:]
+
+def nextPage(url, pn):
+  url_pn = cutBegin(url, '&first=')
+  if not url_pn:
+    url_pn = 0
+  url_pn = int(url_pn) + pn
+  return cutTo(url, '&first') + '&first=' + str(url_pn)
+
+def start(size, savedir, pepolename):
+  global CONSTCOUNT
+  global SIZE
+  SIZE = size
+  #CONSTCOUNT = 0
+  print 'Generate search url'
+  #http://cn.bing.com/images/search?&q=成龙&qft=+filterui:photo-photo+filterui:face-face+filterui:imagesize-medium&first=50
+  if size == 1:
+    sizeStr = "small"
+  else:
+    if size == 2:
+      sizeStr = "medium"
+    else:
+      if size == 3:
+        sizeStr = "large"
+      else:
+        if size == 9:
+          sizeStr = "wallpaper"
+  URL = "http://cn.bing.com/images/search?&qft=+filterui:photo-photo+filterui:imagesize-"+sizeStr+"&q=" + str(CONSTNAME)
+  print(URL)
+  imglist = []
+  while_n = 0
+  onlyFlg = 0 #如果搜索到没有资源的时候页面内只会存在1张图片，做一个flg作为结束标识
+
+  #n_d = 0;
+  while onlyFlg == 0:
+    #if(n_d > 0):
+    #    break
+    print while_n,
+    while_n += 1
+    tmplist = getImageUrlList(URL)
+    print 'tmplist = %s' %tmplist
+    ltlist = len(tmplist)
+    print ltlist,
+    imglist = imglist + tmplist
+    URL = nextPage(URL, ltlist)
+    print URL
+    #n_d += 1
+    if ( len(imglist) > 1000):
+    #if(len(tmplist)<35 or while_n>2):
+      onlyFlg = 1
+      break
+
+  queue = Queue()
+  for url in imglist:
+    queue.put(url)
+
+  failure = []
+  global THREADCOUNT
+  #if count > 0:
+  #for i in range(Config.thread_count):
+   # start_new_thread(downloadFromQueue, (queue, failure, CONSTNAME.decode('utf-8'), Config.timeout))
+   # THREADCOUNT = THREADCOUNT+1
+   # print '   '+str(i)+'in_thread:'+str(THREADCOUNT),
+  #THREADCOUNT = THREADCOUNT+1
+  #print '    thread:'+str(THREADCOUNT),
+  print "aa"
+  downloadFromQueue(savedir, queue, failure, pepolename, Config.timeout)
+  print "wait"
+  #time.sleep(600)
+  time.sleep(2)
+  print "gogogo!"
+  #print THREADCOUNT
+  #while THREADCOUNT > 8:
+  #  time.sleep(10)
+  #  print '    thread:'+str(THREADCOUNT),
+
+
+
+def mybaidudownload(strNamelist, savedir):
+    print strNamelist;
+    print savedir;
+    if (savedir[len(savedir)-1] != '\\' and savedir[len(savedir)-1] != '/'):
+        savedir = savedir + '/'
+    global CONSTNAME
+    if Config.proxy:
+      print 'Config proxy .......'
+      proxy_install(Config.proxy)
+
+    if not os.path.isfile(strNamelist):
+        print 'list file doesnt exist.'
+        return False
+    fhand = open(strNamelist, 'r')
+    filelines = fhand.readlines()
+    if(len(filelines) == 0):
+        print "some error with reading list file!"
+        return
+    global CONSTCOUNT
+    for celebrity in filelines:
+        CONSTCOUNT = 0
+        people = celebrity[0:-1] #remove '\n'
+        savepath = savedir + people.decode('utf-8')
+        #CONSTNAME = people
+        CONSTNAME = urllib.quote(people)
+        print 'CONSTNAME = %s' %CONSTNAME
+        if os.path.isdir(savepath):
+            if len(os.listdir(savepath)) > 600:
+                print savepath + " has been downloaded!. you can delete it and redownload!"
+                continue
+            else:
+                print savepath + " exists. please delete it firstly!"
+                continue
+        else:
+            os.mkdir(savepath)
+            start(2, savedir, people)
+            #start(3, savedir, people)
+            #start(9, savedir, people)
+
+    fhand.close()
+
+if __name__ == "__main__":
+
+    mybaidudownload('D:\\workspace\\image\\aaa.txt', "D:\\workspace\\image")
+
+
+
+
+
+
+
+
